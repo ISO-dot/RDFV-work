@@ -1,0 +1,27 @@
+# Load data.table for large datasets
+library(data.table)
+
+# Convert the data to data.table (if it's not already)
+data <- as.data.table(data)
+
+# Use the same logic with data.table
+remove_outliers_dt <- function(data) {
+  # Apply the outlier removal for each column
+  for (col in names(data)) {
+    Q1 <- quantile(data[[col]], 0.25, na.rm = TRUE)
+    Q3 <- quantile(data[[col]], 0.75, na.rm = TRUE)
+    IQR <- Q3 - Q1
+    lower_bound <- Q1 - 1.5 * IQR
+    upper_bound <- Q3 + 1.5 * IQR
+    
+    # Remove rows that are outside the bounds in any column
+    data <- data[data[[col]] >= lower_bound & data[[col]] <= upper_bound]
+  }
+  return(data)
+}
+
+# Remove outliers using data.table
+clean_data_dt <- remove_outliers_dt(data)
+
+# View the cleaned data
+head(clean_data_dt)
