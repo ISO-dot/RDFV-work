@@ -1,0 +1,64 @@
+
+#separate the RDFV PM2.5 dataset into months.
+#calculate % of total month do not contain values
+#graph this on a plot
+
+pacman::p_load(data.table, tidyverse, lubridate, openair, tidyr, randomForest, ggplot2, 
+               dplyr, beepr, curl, jsonlite, ggcorrplot, reshape2)
+
+df <- read.csv("C:/Users/colmb/OneDrive/Documents/Masters/Major Project/Regio Deal project data folder/data download/RDFV data, scripts, and graphs/sensoren_rdfv_IRAS (2).csv")
+
+raw_df <- read.csv("C:/Users/colmb/OneDrive/Documents/Masters 2025/Major Project/Regio Deal project data folder/data download/RDFV data, scripts, and graphs/Widened raw sensor dataset.csv")
+
+#remove all non-PM2.5 rows.
+raw_pm25 <- raw_df[raw_df$Measurement == "pm25", ]
+
+summary(raw_df$Completeness)
+
+completeness
+
+# Convert 'Date' to Date class if it's not already
+raw_pm25$timestamp_from <- as.Date(raw_df$timestamp_from)
+
+
+######
+
+
+
+# Convert 'date' to Date type if it's not already
+data$date <- as.Date(data$date)
+
+# Extract month and year from the 'date' column
+raw_pm25 <- raw_pm25 %>%
+  mutate(month = format(timestamp_from, "%Y-%m"))  # Format date to 'YYYY-MM'
+
+# Calculate the percentage of non-NA values for each column (sensor) for each month
+percent_completeness <- raw_pm25 %>%
+  select(-timestamp_from  & - Measurement) %>%  # Remove the date column, we don't need it here
+  gather(key = "sensor", value = "value", -month) %>%  # Reshape data into long format
+  group_by(month, sensor) %>%
+  summarise(
+    completeness = sum(!is.na(value)) / n() * 100,
+    .groups = 'drop'
+  )
+
+
+
+
+####
+
+
+
+ggplot(percent_completeness, aes(x = sensor, y = month, fill = completeness)) +
+  geom_tile() +  # Create a tile for each sensor-month combination
+  scale_fill_gradient(low = "red", high = "blue") +  # Color gradient from white (0%) to blue (100%)
+  labs(title = "Percentage Completeness of Sensors by Month",
+       x = "Sensor",
+       y = "Month",
+       fill = "Completeness") +
+  theme_minimal() +  # Clean theme
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))  # R
+
+ggsave("RDFV monthly completeness.png", path = "C:/Users/colmb/OneDrive/Documents/Masters 2025/Major Project/Regio Deal project data folder/data download/RDFV data, scripts, and graphs/graphs", 
+       width = 12, height = 12, device='png', dpi=1000)
+
