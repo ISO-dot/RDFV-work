@@ -1,0 +1,279 @@
+
+#separate the RDFV PM2.5 dataset into months.
+#calculate % of total month do not contain values
+#graph this on a plot
+
+pacman::p_load(data.table, tidyverse, lubridate, openair, tidyr, randomForest, ggplot2, 
+               dplyr, beepr, curl, jsonlite, ggcorrplot, reshape2, paletteer)
+
+df <- read.csv("C:/Users/colmb/OneDrive/Documents/Masters 2025/Major Project/Regio Deal project data folder/data download/RDFV data, scripts, and graphs/sensoren_rdfv_IRAS (2).csv")
+
+raw_df <- read.csv("C:/Users/colmb/OneDrive/Documents/Masters 2025/Major Project/Regio Deal project data folder/data download/RDFV data, scripts, and graphs/Widened raw sensor dataset.csv")
+
+#remove all non-PM2.5 rows.
+raw_pm25 <- raw_df[raw_df$Measurement == "pm25", ]
+raw_pm10 <- raw_df[raw_df$Measurement == "pm10", ]
+raw_no2 <- raw_df[raw_df$Measurement == "no2", ]
+
+summary(raw_df$Completeness)
+
+completeness
+
+# Convert 'Date' to Date class if it's not already
+raw_pm25$timestamp_from <- as.POSIXct(raw_pm25$timestamp_from)
+
+#show all sensors and months where the completeness is lower than 50%, 
+#which sensors appear the most.
+
+
+raw_pm25 <- raw_pm25 %>%
+  mutate(timestamp_from = ymd_hms(timestamp_from))  # or ymd(), dmy(), etc., depending on your format
+
+
+
+
+##############
+
+
+
+# Convert 'date' to Date type if it's not already
+raw_pm25$timestamp_from <- as.Date(raw_pm25$timestamp_from)
+
+# Extract month and year from the 'date' column
+raw_pm25 <- raw_pm25 %>%
+  mutate(month = format(timestamp_from, "%Y-%m"))  # Format date to 'YYYY-MM'
+
+print(raw_pm10$month)
+
+# Calculate the percentage of non-NA values for each column (sensor) for each month
+percent_completeness_pm10 <- raw_pm10 %>%
+  select(-timestamp_from  & -Measurement & -X) %>%  # Remove the date column, we don't need it here
+  gather(key = "sensor", value = "value", -month) %>%  # Reshape data into long format
+  group_by(month, sensor) %>%
+  summarise(
+    completeness = sum(!is.na(value)) / n() * 100,
+    .groups = 'drop'
+  )
+
+
+
+#### find %completeness by sensor over the whole sampling period rather than month.
+# Calculate the percentage of non-NA values for each sensor over the entire sampling period
+total_completeness_pm25 <- raw_pm25 %>%
+  select(-timestamp_from, -Measurement, -X) %>%  # Remove the unnecessary columns
+  gather(key = "sensor", value = "value") %>%  # Reshape data into long format
+  group_by(sensor) %>%
+  summarise(
+    completeness = sum(!is.na(value)) / n() * 100,
+    .groups = 'drop'
+  )
+
+sensors_below_75 <- total_completeness_pm25 %>%
+  filter(completeness < 75) %>%
+  count(sensor, sort = TRUE)
+
+# Show the sensors with the highest occurrence
+sensors_below_50
+sensors_below_35
+sensors_above_75
+sensors_below_75 
+
+
+#####remove sensors_below_75 from the analysis.
+
+####
+columns_to_remove <- sensors_below_75$sensor
+
+# Remove those columns from df_main
+pm25_cleaned <- raw_pm25 %>%
+  select(-all_of(columns_to_remove))
+pm25_cleaned$X <-NULL
+
+
+
+ggplot(total_completeness_pm25, aes(x = sensor, y = month, fill = completeness)) +
+  geom_tile() +  # Create a tile for each sensor-month combination
+  scale_fill_gradient(low = "cyan", high = "darkslategrey") +  # Color gradient from white (0%) to blue (100%)
+  labs(title = "%Completeness of PM25 by Sensors",
+       x = "Sensor",
+       y = "Month",
+       fill = "Completeness(%)") +
+  theme_minimal() +  # Clean theme
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_x_discrete(position = "top") 
+
+ggsave("RDFV monthly no2 completeness.png", path = "C:/Users/colmb/OneDrive/Documents/Masters 2025/Major Project/Regio Deal project data folder/data download/RDFV data, scripts, and graphs/graphs", 
+       width = 12, height = 12, device='png', dpi=1000)
+
+
+##### check for how continuous hte NAs in each sensor column are.
+# Example dataframe (replace this with your actual dataframe)
+
+
+# Function to identify consecutive NAs and their lengths
+identify_consecutive_NAs <- function(column) {
+  na_sequences <- rle(is.na(column))  # Run-length encoding to detect NAs
+  na_lengths <- na_sequences$lengths[na_sequences$values]  # Extract lengths of NAs
+  return(na_lengths)
+}
+
+# Apply the function to each column in the dataframe and store results
+na_info <- sapply(raw_pm25, identify_consecutive_NAs)
+
+# Print the results
+na_info
+
+
+# Reshape the data to a long format for plotting
+na_info_long <- stack(na_info)
+colnames(na_info_long) <- c("NA_Length", "Sensor")
+
+# Create a bar plot of the NA sequence lengths
+ggplot(na_info_long, aes(x = Sensor, y = NA_Length)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Consecutive NA Sequences in Sensors",
+       x = "Sensor",
+       y = "Length of Consecutive NAs") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0.5))
+
+ggsave("consecutive NA seq barplot(2).png", path = "C:/Users/colmb/OneDrive/Documents/Masters 2025/Major Project/Regio Deal project data folder/data download/RDFV data, scripts, and graphs/graphs", 
+       width = 12, height = 12, device='png', dpi=1000)
+
+
+# 1. Pivot from wide to long format
+# Replace 'timestamp' with your actual timestamp column name if different
+long_df <- pm25_cleaned%>%
+  pivot_longer(cols = where(is.numeric), names_to = "sensor_id", values_to = "value") %>%
+  mutate(
+    timestamp = as.Date(timestamp_from),
+    year = year(timestamp),
+    month = month(timestamp, label = TRUE),
+    month_num = month(timestamp)
+  )
+long_df <- long_df
+
+long_df$month <- factor(long_df$month, levels = month.abb, ordered = TRUE)
+
+
+# 3. Plot with facets per month
+ggplot(long_df, aes(x = month, y = value, fill = factor(year))) +
+  geom_boxplot(outlier.size = 0.8, position = position_dodge(width = 0.75)) +
+  labs(title = "Sensor Value Distribution by Month and Year",
+       x = "Month", y = "Sensor Value",
+       fill = "Year") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(size = 12))
+
+
+
+ggplot(long_df, aes(x = sensor_id, y = value)) +
+  geom_boxplot() +
+  labs(title = "Sensor >75% PM2.5 Values - Boxplot",
+       x = "Sensor",
+       y = "PM2.5 Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# Step 2: Plot one sensor column (e.g., "Sensor_1") over time
+ggplot(raw_pm25, aes(x = timestamp_from, y = SSK_RDFV042)) +
+  geom_line(color = "blue") +
+  labs(title = "SSK_RDFV042 Readings Over Time",
+       x = "Time",
+       y = "PM2.5 Value") +
+  theme_minimal()
+
+
+ggsave("sensor 42 trendline.png", path = "C:/Users/colmb/OneDrive/Documents/Masters 2025/Major Project/Regio Deal project data folder/data download/RDFV data, scripts, and graphs/graphs", 
+       width = 12, height = 12, device='png', dpi=1000)
+
+
+
+
+###### Quantify change in %completeness over time
+library(lubridate)
+
+completeness_by_time <- raw_pm25 %>%
+  select( -Measurement, -X) %>%
+  gather(key = "sensor", value = "value", -timestamp_from) %>%
+  mutate(
+    timestamp_from_parsed = parse_date_time(timestamp_from, orders = c("ymd HMS", "ymd HM", "ymd", "dmy HMS", "dmy HM", "dmy")),
+    month = floor_date(timestamp_from_parsed, "month")
+  ) %>%
+  group_by(sensor, month) %>%
+  summarise(
+    completeness = sum(!is.na(value)) / n() * 100,
+    .groups = 'drop'
+  )
+
+
+# Step 2: Option 1 - Calculate linear trend of incompleteness over time
+library(purrr)
+library(broom)
+
+# Fit a linear model per sensor to estimate trend
+incompleteness_trends <- incompleteness_by_time %>%
+  group_by(sensor) %>%
+  nest() %>%
+  mutate(model = map(data, ~lm(incompleteness ~ as.numeric(month), data = .x)),
+         trend = map_dbl(model, ~coef(.x)[2])) %>%  # Slope of change over time
+  select(sensor, trend)
+
+# Step 3: Option 2 - Change from first to last month (delta)
+incompleteness_change <- incompleteness_by_time %>%
+  group_by(sensor) %>%
+  arrange(month) %>%
+  summarise(
+    first_month = first(incompleteness),
+    last_month = last(incompleteness),
+    change = last_month - first_month,
+    .groups = 'drop'
+  )
+### Graph incompleteness trends
+ggplot(completeness_by_time, aes(x = month, y = completeness)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(
+    title = "% Incompleteness Over Time by Sensor",
+    x = "Month",
+    y = "% Incompleteness",
+    color = "Sensor"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+
+ggplot(completeness_by_time, aes(x = month, y = sensor, fill = completeness)) +
+  geom_tile(color = "white") +
+  scale_fill_viridis_c(name = "% Incompleteness", option = "C") +
+  labs(
+    title = "Sensor Completeness Over Time (Heatmap)",
+    x = "Month",
+    y = "Sensor"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+
+
+ggplot(incompleteness_by_time, aes(x = month, y = incompleteness)) +
+  geom_line(color = "steelblue", size = 1) +
+  geom_point(color = "darkred", size = 1.5) +
+  facet_wrap(~ sensor, scales = "free_y") +
+  labs(
+    title = "% Incompleteness Over Time per Sensor",
+    x = "Month",
+    y = "% Incompleteness"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
