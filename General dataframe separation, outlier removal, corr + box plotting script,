@@ -1,0 +1,441 @@
+#filtering AQ components from the main dataset.
+#remove non-75% completeness compliant sensors.
+#identify outliers
+#for PM2.5 then separating the datasets into pre-2024 and post-2024
+#then another split of the data. Replace outliers with NA. Then separately set them to teh 99th percentile.
+#report on quartile values for each designated timeframe, 25th/75th for each season in the years.
+#do this separately for each pollutant
+
+all_data <- read.csv("data.path")
+
+pacman::p_load(data.table, tidyverse, lubridate, openair, tidyr, randomForest, ggplot2, 
+               dplyr, beepr, curl, jsonlite, ggcorrplot, reshape2, paletteer, ggpubr)
+load("path.RData")
+setwd()
+
+
+alldata <- read_csv("dataset.csv")
+pm25_hc <- read_csv("PM2.5_high_completeness_df.csv")
+
+pm25_hc <- read_csv("previosuly_separated_pm2.5csv")
+percentile_counts_pmX <- read_csv("percentile.counts.pmX.csv")
+
+#removal of >75% complete but high outlier cols; chosen a priori.
+pm25_hc <- pm25_hc %>%
+  select(-c("list of cols"))
+
+pm25_hc <- pm25_hc %>%
+  mutate(
+    year = as.factor(format(timestamp_from, "%Y")),
+    month = as.factor(format(timestamp_from, "%m"))
+  )
+
+#i want the values of all rows until teh timestamp_from = a certain date
+#for the matrices sub-set the wide whole sensor data, not the long whole sensor data.
+
+
+# Set desired percentiles (e.g., 1st and 99th)
+lower_percentile <- 0.01
+upper_percentile <- 0.99
+
+
+# Caculates percentiles and counts for each numeric column
+pm25_get_percentiles_and_counts <- function(pm25_hc, probs = c(lower_percentile, upper_percentile)) {
+  numeric_data <- pm25_hc[sapply(pm25_hc, is.numeric)]
+  
+  results <- lapply(names(numeric_data), function(colname) {
+    col <- numeric_data[[colname]]
+    qs <- quantile(col, probs = probs, na.rm = TRUE)
+    
+    below <- sum(col < qs[1], na.rm = TRUE)
+    above <- sum(col > qs[2], na.rm = TRUE)
+    
+    data.frame(
+      Column = colname,
+      LowerPercentile = qs[1],
+      UpperPercentile = qs[2],
+      CountBelow = below,
+      CountAbove = above,
+      stringsAsFactors = FALSE
+    )
+  })
+  
+  # Combine into a single dataframe
+  result_df <- do.call(rbind, results)
+  return(result_df)
+}
+
+# Run the function
+percentile_counts_pm25 <- pm25_get_percentiles_and_counts(pm25_hc, 
+                                                          probs = c(lower_percentile, upper_percentile))
+view(percentile_counts_pm25)
+
+write.csv(percentile_counts_pm25, "pm2.5_percentile_counts_hc_rm.csv")
+
+
+
+#Set outliers to threshold - ultimately the better method.
+set_outliers_to_threshold <- function(pm25_hc, thresholds_df) {
+  data_clean <- pm25_hc
+  total_values <- 0
+  outlier_count <- 0
+  
+  for (i in 3:nrow(thresholds_df)) {
+    col <- thresholds_df$Column[i]
+    lower <- thresholds_df$LowerPercentile[i]
+    upper <- thresholds_df$UpperPercentile[i]
+    
+    if (col %in% names(data_clean) && is.numeric(data_clean[[col]] )) {
+      col_values <- data_clean[[col]]
+      is_low_outlier <- col_values < lower
+      is_high_outlier <- col_values > upper
+      
+      outlier_count <- outlier_count + sum(is_low_outlier | is_high_outlier, na.rm = TRUE)
+      total_values <- total_values + length(col_values)
+      
+      # Set outliers to respective threshold
+      data_clean[[col]][is_low_outlier] <- lower
+      data_clean[[col]][is_high_outlier] <- upper
+    }
+  }
+  
+  pct_replaced <- round(outlier_count / total_values * 100, 2)
+  cat("Total values checked:", total_values, "\n")
+  cat("Outliers set to threshold:", outlier_count, "\n")
+  cat("Percent of values set:", pct_replaced, "%\n")
+  
+  return(data_clean)
+}
+
+# Apply the function
+pm25_outlier_to_threshold <- set_outliers_to_threshold (pm25_hc, percentile_counts_pm25)
+
+
+
+
+
+
+# Function to replace outliers with NA (value-wise, not row-wise)
+replace_outliers_with_na <- function(pm25_hc, thresholds_df) {
+  data_clean <- pm25_hc
+  total_values <- 0
+  outlier_count <- 0
+  
+  for (i in 1:nrow(thresholds_df)) {
+    col <- thresholds_df$Column[i]
+    lower <- thresholds_df$LowerPercentile[i]
+    upper <- thresholds_df$UpperPercentile[i]
+    
+    if (col %in% names(data_clean) && is.numeric(data_clean[[col]])) {
+      col_values <- data_clean[[col]]
+      is_outlier <- col_values < lower | col_values > upper
+      
+      outlier_count <- outlier_count + sum(is_outlier, na.rm = TRUE)
+      total_values <- total_values + length(col_values)
+      
+      # Replace outliers with NA
+      data_clean[[col]][is_outlier] <- NA
+    }
+  }
+  
+  loss_pct <- round(outlier_count / total_values * 100, 2)
+  cat("Total values checked:", total_values, "\n")
+  cat("Outliers replaced with NA:", outlier_count, "\n")
+  cat("Percent of values replaced:", loss_pct, "%\n")
+  
+  return(data_clean)
+}
+
+# Apply the function
+pm25_outlier_rm <- replace_outliers_with_na(pm25_hc, percentile_counts_pm25)
+
+
+
+#seperate outlier-removed dataset into pre-and post-2024
+pm25_rmwide_early <- pm25_outlier_rm%>%
+  filter(timestamp_from < as.POSIXct("2024-01-01 01:00:00"))
+
+pm25_rmwide_later <- pm25_outlier_rm %>%
+  filter(timestamp_from >= as.POSIXct("2024-01-01 01:00:00"))
+
+
+
+#Set outliers to threshold - ultimately the better method.
+set_outliers_to_threshold <- function(pm25_hc, thresholds_df) {
+  data_clean <- pm25_hc
+  total_values <- 0
+  outlier_count <- 0
+  
+  for (i in 3:nrow(thresholds_df)) {
+    col <- thresholds_df$Column[i]
+    lower <- thresholds_df$LowerPercentile[i]
+    upper <- thresholds_df$UpperPercentile[i]
+    
+    if (col %in% names(data_clean) && is.numeric(data_clean[[col]] )) {
+      col_values <- data_clean[[col]]
+      is_low_outlier <- col_values < lower
+      is_high_outlier <- col_values > upper
+      
+      outlier_count <- outlier_count + sum(is_low_outlier | is_high_outlier, na.rm = TRUE)
+      total_values <- total_values + length(col_values)
+      
+      # Set outliers to respective threshold
+      data_clean[[col]][is_low_outlier] <- lower
+      data_clean[[col]][is_high_outlier] <- upper
+    }
+  }
+  
+  pct_replaced <- round(outlier_count / total_values * 100, 2)
+  cat("Total values checked:", total_values, "\n")
+  cat("Outliers set to threshold:", outlier_count, "\n")
+  cat("Percent of values set:", pct_replaced, "%\n")
+  
+  return(data_clean)
+}
+
+# Apply the function
+pm25_outlier_to_threshold <- set_outliers_to_threshold (pm25_hc, percentile_counts_pm25)
+
+#separate PM2.5 sensor-removed dataset into pre-and post-2024. 
+#as.POSICct is formatted as such due to timezone error not including hours around newyears
+pm25wide_early <- pm25_outlier_to_threshold %>%
+  filter(timestamp_from < as.POSIXct("2024-01-01 01:00:00"))
+
+pm25wide_later <- pm25_outlier_to_threshold%>%
+  filter(timestamp_from >= as.POSIXct("2024-01-01 01:00:00"))
+
+write.csv(pm10wide_early, "PM10hc_threshold_wide_pre-2024")
+write.csv(pm10wide_later, "PM10hc_threshold_wide_post-2024.csv")
+
+
+##rough idea of graphing no-outlier capping or removal
+pm25_no_rm <- pm25_hc %>%
+  select(-c(timestamp_from, Measurement, month, year, ...1))
+
+#For the matrices delete non-sensor cols.
+pm25_early_precorr <- pm25wide_early %>%
+  select(-c(timestamp_from, Measurement, month, year, ...1))
+pm25_later_precorr <- pm25wide_later %>%
+  select(-c(timestamp_from, Measurement, month, year, ...1))
+
+
+pm25_rm_early_precorr <- pm25_rmwide_early %>%
+  select(-c(timestamp_from, Measurement, month, year, ...1))
+pm25_rm_later_precorr <- pm25_rmwide_later %>%
+  select(-c(timestamp_from, Measurement, month, year, ...1))
+
+
+#no-outlier corrections
+pm25_no_rm_correlation_matrix_spearman <- cor(pm25_no_rm, 
+                                              use = "pairwise.complete.obs", method = 'spearman')
+pm25_no_rm_correlation_matrix_pearson <- cor(pm25_no_rm,
+                                             use = "pairwise.complete.obs", method = 'pearson')
+
+#outlier-capped correlations
+pm25_early_correlation_matrix_spearman <- cor(pm25_early_precorr, 
+                                        use = "pairwise.complete.obs", method = 'spearman')
+pm25_early_correlation_matrix_pearson <- cor(pm25_early_precorr, 
+                                       use = "pairwise.complete.obs", method = 'pearson')
+
+pm25_later_correlation_matrix_spearman <- cor(pm25_later_precorr, 
+                                              use = "pairwise.complete.obs", method = 'spearman')
+pm25_later_correlation_matrix_pearson <- cor(pm25_later_precorr, 
+                                             use = "pairwise.complete.obs", method = 'pearson')
+
+
+####outlier-removed corr matrices #########################
+pm25_rm_early_correlation_matrix_spearman <- cor(pm25_rm_early_precorr , 
+                                              use = "pairwise.complete.obs", method = 'spearman')
+pm25_rm_early_correlation_matrix_pearson <- cor(pm25_rm_early_precorr,  
+                                             use = "pairwise.complete.obs", method = 'pearson')
+
+pm25_rm_later_correlation_matrix_spearman <- cor(pm25_rm_later_precorr, 
+                                              use = "pairwise.complete.obs", method = 'spearman')
+pm25_rm_later_correlation_matrix_pearson <- cor(pm25_rm_later_precorr, 
+                                             use = "pairwise.complete.obs", method = 'pearson')
+
+
+#function for correlation heatmap plotting - for brevity of code. Chagnge limits as required.
+plot_correlation_heatmap <- function(cor_matrix, title, fill_label) {
+  ggplot(melt(cor_matrix), aes(Var1, Var2, fill = value)) +
+    geom_tile() +
+    scale_fill_gradient(low = "cyan", high = "darkslategrey", limit = c(0, 1)) +
+    theme_minimal() +
+    labs(title = title, x = "Sensors", y = "Sensors", fill = fill_label) +
+    theme(axis.text.x = element_text(size = 5, angle = 90, hjust = 1), 
+          axis.text.y = element_text(size = 5, angle = 0, hjust = 1))
+}
+
+
+plot_correlation_heatmap(pm25_no_rm_correlation_matrix_pearson,
+                         "PM2.5 all-data, no-outlier removal Correlation Heatmap (Pearson)",
+                         "Pearson Correlation")
+
+plot_correlation_heatmap(pm25_early_correlation_matrix_spearman,
+                         "PM2.5 all-data, no-outlier removal Correlation Heatmap (Spearman)",
+                         "Spearman Correlation")
+  
+
+######OUTLIER-CAPPED CORRPLOTTING
+e_pear <- plot_correlation_heatmap(pm25_early_correlation_matrix_pearson,
+                         "PM2.5 pre-2024 outlier-capped Correlation Heatmap (Pearson)",
+                         "Pearson Correlation")
+
+e_spea <- plot_correlation_heatmap(pm25_early_correlation_matrix_spearman,
+                         "PM2.5 pre-2024 outlier-capped Correlation Heatmap (Spearman)",
+                         "Spearman Correlation")
+
+l_pear <- plot_correlation_heatmap(pm25_later_correlation_matrix_pearson,
+                         "PM2.5 post-2024 outlier-capped Correlation Heatmap (Pearson)",
+                         "Pearson Correlation")
+
+l_spea <- plot_correlation_heatmap(pm25_later_correlation_matrix_spearman,
+                         "PM2.5 post-2024 outlier-capped Correlation Heatmap (Spearman)",
+                         "Spearman Correlation")
+
+ggarrange(e_pear, e_spea,l_pear, l_spea, 
+          labels = c("A", "B", "C", "D"),
+          ncol = 2, nrow = 2)
+
+ggsave("PM2.5_corrplots_outlier_cap_grouped.png", 
+       path = "graphs.path", 
+       width = 16, height = 9, device='png', dpi=300)
+
+####SAME AS ABOVE BUT FOR OUTLIER-REMOVED SENSOR DATA
+e_rm_pear <- plot_correlation_heatmap(pm25_rm_early_correlation_matrix_pearson,
+                         "PM2.5 pre-2024 outlier-removed Correlation Heatmap (Pearson)",
+                         "Pearson Correlation")
+
+e_rm_spea <- plot_correlation_heatmap(pm25_rm_early_correlation_matrix_spearman,
+                         "PM2.5 pre-2024 outlier-removed Correlation Heatmap (Spearman)",
+                         "Spearman Correlation")
+
+l_rm_pear <- plot_correlation_heatmap(pm25_rm_later_correlation_matrix_pearson,
+                         "PM2.5 post-2024 outlier-removed Correlation Heatmap (Pearson)",
+                         "Pearson Correlation")
+
+l_rm_spea <- plot_correlation_heatmap(pm25_rm_later_correlation_matrix_spearman,
+                         "PM2.5 post-2024 outlier-removed Correlation Heatmap (Spearman)",
+                         "Spearman Correlation")
+
+
+ggarrange(e_rm_pear, e_rm_spea,l_rm_pear, l_rm_spea, 
+          labels = c("A", "B", "C", "D"),
+          ncol = 2, nrow = 2)
+ggsave("PM2.5_corrplots_outlier_rm_grouped.png", 
+       path = "graphs.path", 
+       width = 16, height = 9, device='png', dpi=1000)
+
+
+
+write.csv(pm25_correlation_matrix_spearman, "pm2.5_early_corr_matrix_spearman.csv")
+write.csv(pm25_correlation_matrix_pearson, "pm2.5_full_corr_matrix_pearson.csv")
+
+
+#turn hc wide dataframes long for boxplotting and others.
+pm25_cap_early_long <- pm25wide_early %>% 
+  pivot_longer(
+    cols = -c(timestamp_from, Measurement, month, year, ...1), 
+    names_to = "sensor",
+    values_to = "value"
+  )
+
+pm25_cap_later_long <- pm25wide_later %>% 
+  pivot_longer(
+    cols = -c(timestamp_from, Measurement, month, year, ...1), 
+    names_to = "sensor",
+    values_to = "value"
+  )
+
+
+##### boxplot year-separated averages.
+ggplot(pm25_rm_early_long, aes(x = sensor, y = value, fill = factor(year))) +
+  geom_boxplot(outlier.size = 0.8, position = position_dodge(width = 0.75)) +
+  labs(title = "PM2.5 high-complete, pre-2024, outlier-removed",
+       x = "Sensor", y = "Sensor Value",
+       fill = "Year") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(size = 12))
+
+ggsave("pm2.5_boxplot_pre-24_outlier-rm_.png", 
+       path = "U:/1. RDFV data work/graphs", 
+       width = 10, height = 10, device='png', dpi=1000)
+
+
+#the following to to graph and trendline outlier sensors that show low correlation in the corr
+pm10_filtered <- pm10_long %>%
+  filter(sensor == "SSK_RDFV00X")
+
+#create the line plot to visualise outlier
+ggplot(pm10_filtered, aes(x = timestamp_from, y = value)) +
+  geom_line(color = "steelblue") +
+  labs(title = "PM2.5 Over Time - SSK_RDFV00X",
+       x = "Timestamp",
+       y = "PM10 Value") +
+  theme_minimal()
+
+ggsave("hist_sensorX.png", 
+       path = "path", 
+       width = 8, height = 8, device='png', dpi=1000)
+
+
+
+
+#### turn the outlierless df long and plot the monthly values of PM2.5
+long_df_rm <- pm25_outlier_rm%>%
+  pivot_longer(cols = where(is.numeric), names_to = "sensor_id", values_to = "value") %>%
+  mutate(
+    timestamp = as.Date(timestamp_from),
+    year = year(timestamp),
+    month = month(timestamp, label = TRUE),
+    month_num = month(timestamp)
+  )
+
+long_df_rm$month <- factor(long_df_rm$month, levels = month.abb, ordered = TRUE)
+
+
+#Plot with facets per month
+ggplot(pm25_rm_early_long, aes(x = month, y = value, fill = factor(year))) +
+  geom_boxplot(outlier.size = 0.8, position = position_dodge(width = 0.75)) +
+  labs(title = "PM2.5 Sensor Value Distribution by Month and Year",
+       x = "Month", y = "Sensor Value",
+       fill = "Year") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(size = 12))
+
+ggsave("pm25_box_monthly_over75_99_outlier.png", path = "graphs.path", 
+       width = 8, height = 8, device='png', dpi=300)
+
+
+summary(pm25_outlier_to_threshold)
+
+
+###find the descriptive stats of the outlier-capped, high-complete PM2.5 sensor values. 
+pm25_early_stats <- pm25_cap_early_long %>%
+  group_by(year) %>%
+  summarise(
+    mean = mean(value, na.rm = TRUE),
+    sd = sd(value, na.rm = TRUE),
+    p10 = quantile(value, 0.10, na.rm = TRUE),
+    p25 = quantile(value, 0.25, na.rm = TRUE),
+    p75 = quantile(value, 0.75, na.rm = TRUE),
+    min = min(value, na.rm = TRUE),
+    max = max(value, na.rm = TRUE)
+  )
+view(pm25_early_stats)
+
+pm25_later_stats <- pm25_cap_later_long %>%
+  group_by(year) %>%
+  summarise(
+    mean = mean(value, na.rm = TRUE),
+    sd = sd(value, na.rm = TRUE),
+    p10 = quantile(value, 0.10, na.rm = TRUE),
+    p25 = quantile(value, 0.25, na.rm = TRUE),
+    p75 = quantile(value, 0.75, na.rm = TRUE),
+    min = min(value, na.rm = TRUE),
+    max = max(value, na.rm = TRUE)
+  )
+
+view(pm25_later_stats)
